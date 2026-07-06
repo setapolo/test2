@@ -8,36 +8,90 @@ on:
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      message:
+        description: "Message for the local workflow worker. Use status, echo: TEXT, or any text for ACK."
+        required: false
+        default: "status"
+        type: string
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
 concurrency:
   group: "pages"
   cancel-in-progress: false
 
 jobs:
-  # Single deploy job since we're just deploying
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  request:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-      - name: Upload artifact
+      - name: Create request
+        env:
+          WORKFLOW_MESSAGE: ${{ github.event.inputs.message || 'status' }}
+        run: |
+          python3 scripts/create_request.py \
+            --message "$WORKFLOW_MESSAGE" \
+            --output request.json
+      - name: Upload request artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: request.json
+          if-no-files-found: error
+
+  worker:
+    needs: request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download request artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: request-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Process request
+        run: python3 scripts/process_request.py --request request.json --output response.json
+      - name: Upload response artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: response-${{ github.run_id }}-${{ github.run_attempt }}
+          path: response.json
+          if-no-files-found: error
+
+  build:
+    needs: worker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download response artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: response-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Validate and install response
+        run: python3 scripts/install_response.py --response response.json --output api/response.json
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # Upload entire repository
-          path: '.'
+          path: "."
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
